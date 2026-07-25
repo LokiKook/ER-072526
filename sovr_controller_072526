@@ -1,0 +1,2280 @@
+import React, {
+    useEffect,
+    useState,
+    useRef,
+    useCallback,
+    ReactNode,
+} from "react"
+import UserProfile from "./UserProfile.tsx"
+import IndustryPanel from "./INDU.tsx"
+import ExecutivePanel from "./EXEC.tsx"
+import ArchetypePanel from "./ARCH.tsx"
+import CareerArcPanel from "./CARC.tsx"
+import MoatSoundPanel from "./MoatSoundPanel.tsx"
+import { ScoreTicker } from "./ScoreTicker.tsx"
+import { ScoreTicker2 } from "./ScoreTicker2.tsx"
+import Deck1 from "./Deck1.tsx"
+import Deck2 from "./Deck2.tsx"
+import MoatDJPanel from "./MoatDJPanel.tsx"
+import BehavioralResonancePanel from "./BEHR.tsx"
+import Tooltip from "./Tooltip.tsx"
+import PanelDivider from "./PanelDivider.tsx"
+import { ApexScoreboard } from "./ApexScoreboard.tsx"
+import { DocumentBridgeProvider } from "./DocumentBridge.tsx"
+import MoatChatGPT from "./Moat_ChatGPT.tsx"
+import { sendConsoleDataToOpenAI } from "./OpenAIApi.js"
+import { ResumeDataProvider } from "./ResumeDataContext.tsx"
+import type { MoatChatRef } from "./Moat_ChatGPT.tsx"
+import { useATS, ATSProvider } from "./ATSContext.tsx"
+import { TierManager } from "./TierManager.ts"
+import { createClient } from "@supabase/supabase-js"
+import WalletIcon from "./WalletIcon.tsx"
+
+type TuningRecord = Record<string, number>
+
+type NormalizedItem = {
+    type: "header" | "paragraph" | "error" | "page" | "bullet"
+    text: string
+    fontSize?: number
+    details?: string
+}
+
+// --- KEY DEFINITIONS FOR STATE ROUTING ---
+const industryKeys = new Set([
+    "RELV",
+    "EDUC",
+    "SKIL",
+    "FRMT",
+    "KYWD",
+    "IMPT",
+    "CLTO",
+    "COAC",
+])
+const executiveKeys = new Set([
+    "STRG",
+    "LDRS",
+    "ANLY",
+    "INNO",
+    "STKH",
+    "GLOB",
+    "COMM",
+    "PROG",
+])
+const archetypeKeys = new Set([
+    "INCN",
+    "EVRY",
+    "HERO",
+    "CARE",
+    "EXPL",
+    "REBL",
+    "LOVR",
+    "CREA",
+    "JEST",
+    "SAGE",
+    "MAGI",
+    "RULR",
+])
+const careerArcKeys = new Set(["TOT", "INVT"]) // Adjust if more keys belong here
+const behavioralKeys = new Set([
+    "RSIL",
+    "ADPT",
+    "EMPT",
+    "COLL",
+    "INFL",
+    "ANLT",
+    "JUDG",
+    "ACCT",
+    "CRIT",
+    "VALU",
+    "CURS",
+])
+
+const getAdjustedWidths = (
+    containerWidth: number,
+    leftPercent: number,
+    centerPercent: number,
+    rightPercent: number
+) => {
+    if (containerWidth <= 0) {
+        return {
+            adjustedLeftWidth: leftPercent,
+            adjustedCenterWidth: centerPercent,
+            adjustedRightWidth: rightPercent,
+        }
+    }
+
+    const dividerPixelWidth = 6
+    const totalDividerWidthPx = dividerPixelWidth * 2
+    const dividerWidthPercent = (totalDividerWidthPx / containerWidth) * 100
+    const availableWidthPercent = 100 - dividerWidthPercent
+
+    const totalDesiredPercent = leftPercent + centerPercent + rightPercent
+    const scaleFactor = availableWidthPercent / totalDesiredPercent
+
+    const adjustedLeftWidth = leftPercent * scaleFactor
+    const adjustedCenterWidth = centerPercent * scaleFactor
+    const adjustedRightWidth = rightPercent * scaleFactor
+
+    return { adjustedLeftWidth, adjustedCenterWidth, adjustedRightWidth }
+}
+
+const ErrorBoundary = ({ children }: { children: ReactNode }) => {
+    const [hasError, setHasError] = useState(false)
+    const [error, setError] = useState<Error | null>(null)
+    useEffect(() => {
+        const handleError = (event: ErrorEvent) => {
+            setHasError(true)
+            setError(new Error(event.message))
+            console.error(
+                "Error caught in ErrorBoundary:",
+                event.message,
+                event.error?.stack || event.error
+            )
+        }
+        window.addEventListener("error", handleError)
+        return () => window.removeEventListener("error", handleError)
+    }, [])
+    if (hasError) {
+        return (
+            <div style={{ padding: 20, color: "white", background: "#151515" }}>
+                <h1>Something went wrong.</h1>
+                <p>{error?.message || "Unknown error occurred."}</p>
+                <p>Please refresh the page or contact support.</p>
+            </div>
+        )
+    }
+    return <>{children}</>
+}
+
+export default function SovrController() {
+    // --- FIX 1: ISOLATE THE TUNING STATE ---
+    const [industryTuning, setIndustryTuning] = useState<TuningRecord>({})
+    const [executiveTuning, setExecutiveTuning] = useState<TuningRecord>({})
+    const [archetypeTuning, setArchetypeTuning] = useState<TuningRecord>({})
+    const [careerArcTuning, setCareerArcTuning] = useState<TuningRecord>({})
+    const [behavioralTuning, setBehavioralTuning] = useState<TuningRecord>({})
+
+    const combinedTuning = {
+        ...industryTuning,
+        ...executiveTuning,
+        ...archetypeTuning,
+        ...careerArcTuning,
+        ...behavioralTuning,
+    }
+
+    // =========================================================
+
+    // --- ALL OTHER STATE REMAINS UNTOUCHED ---
+    const [isTickerDataReady, setIsTickerDataReady] = useState(false)
+    const [scores, setScores] = useState({
+        industryScore: { pre: 0, post: 0 },
+        executiveScore: { pre: 0, post: 0 },
+        archetypeScore: { pre: 0, post: 0 },
+        careerArcScore: { pre: 0, post: 0 },
+        behavioralScore: { pre: 0, post: 0 },
+    })
+    const [fileContents, setFileContents] = useState<{
+        [filename: string]: NormalizedItem[]
+    }>({})
+    const [showLeftPanel, setShowLeftPanel] = useState(true)
+    const [showRightPanel, setShowRightPanel] = useState(true)
+    const [hoverLeftLabel, setHoverLeftLabel] = useState(false)
+    const [hoverRightLabel, setHoverRightLabel] = useState(false)
+    const [isMoatPlusTier, setIsMoatPlusTier] = useState(false)
+    const [currentTier, setCurrentTier] = useState<string>("FREE")
+    useEffect(() => {
+        setCurrentTier(TierManager.get())
+        const unsub = TierManager.subscribe((tier) => setCurrentTier(tier))
+        return () => {
+            unsub()
+        }
+    }, [])
+
+    const [userId, setUserId] = useState<string>("anonymous")
+    const [walletBalance, setWalletBalance] = React.useState<number | null>(
+        null
+    )
+    const [tokenLimit, setTokenLimit] = React.useState<number | null>(null)
+    useEffect(() => {
+        const supabase = createClient(
+            "https://keyjjxsqwflifeloekej.supabase.co",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtleWpqeHNxd2ZsaWZlbG9la2VqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTA5NzY1NjUsImV4cCI6MjA2NjU1MjU2NX0.t-XwAsW9NJxungDU1vTP2dPNqzjSOjz8t-xmiItqDfo"
+        )
+        supabase.auth.getSession().then(({ data: { session } }) => {
+            if (session?.user?.id) {
+                setUserId(session.user.id)
+            }
+        })
+    }, [])
+    useEffect(() => {
+        if (!userId || userId === "anonymous") return
+        const supabase = createClient(
+            "https://keyjjxsqwflifeloekej.supabase.co",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtleWpqeHNxd2ZsaWZlbG9la2VqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTA5NzY1NjUsImV4cCI6MjA2NjU1MjU2NX0.t-XwAsW9NJxungDU1vTP2dPNqzjSOjz8t-xmiItqDfo"
+        )
+        supabase
+            .from("user_usage")
+            .select("credit_balance, token_limit")
+            .eq("user_id", userId)
+            .single()
+            .then(({ data, error }) => {
+                if (!error && data) {
+                    setWalletBalance(data.credit_balance ?? 0)
+                    setTokenLimit(data.token_limit ?? null)
+                }
+            })
+        const channel = supabase
+            .channel(`wallet-ctrl-${userId}`)
+            .on(
+                "postgres_changes",
+                {
+                    event: "UPDATE",
+                    schema: "public",
+                    table: "user_usage",
+                    filter: `user_id=eq.${userId}`,
+                },
+                (payload: any) => {
+                    if (payload.new?.credit_balance !== undefined)
+                        setWalletBalance(payload.new.credit_balance)
+                }
+            )
+            .subscribe()
+        return () => {
+            supabase.removeChannel(channel)
+        }
+    }, [userId])
+    const [hoverMoatPlus, setHoverMoatPlus] = useState(false)
+    const [hoveredTicker, setHoveredTicker] = useState<string | null>(null)
+    const [chatVisible, setChatVisible] = useState(false)
+    const [leftWidth, setLeftWidth] = useState(32)
+    const [centerWidth, setCenterWidth] = useState(36)
+    const [rightWidth, setRightWidth] = useState(32)
+    const [agentsPanelOpen, setAgentsPanelOpen] = useState(false)
+    const [isButtonClicked, setIsButtonClicked] = useState({
+        green: false,
+        red: false,
+        blue: false,
+        yellow: false,
+        purple: false,
+        orange: false,
+        white: false,
+        pink: false,
+        "neon-green": false,
+        silver: false,
+        "navy-blue": false,
+        cyan: false,
+    })
+    const [effectTrigger, setEffectTrigger] = useState({
+        counter: 0,
+        button: null,
+    })
+    const [animationDuration, setAnimationDuration] = useState(40)
+    const [activePanel, setActivePanel] = useState("archetype")
+    const [activeRightPanel, setActiveRightPanel] = useState("industry")
+    const [activePanelZ, setActivePanelZ] = useState<string | null>(null)
+    const [activeAgent, setActiveAgent] = useState("VIRA")
+    const [isChatPopupOpen, setIsChatPopupOpen] = useState(false)
+    const [isChatLoaded, setIsChatLoaded] = useState(false)
+    const [isPanelExtended, setIsPanelExtended] = useState(false)
+    const [chatMessages, setChatMessages] = useState<any[]>([])
+    const [popupSize, setPopupSize] = useState({ width: 600, height: 500 })
+    const [activeModel, setActiveModel] = useState<string>(
+        "deepseek/deepseek-chat"
+    )
+    // --- NEW STATE FOR LAYOUT CONTROL ---
+    const [layoutMode, setLayoutMode] = useState<
+        "three-panel" | "jd-chat" | "resume-chat"
+    >("three-panel")
+
+    const containerRef = useRef<HTMLDivElement>(null)
+    const leftPanelRef = useRef<HTMLDivElement>(null)
+    const centerPanelRef = useRef<HTMLDivElement>(null)
+    const rightPanelRef = useRef<HTMLDivElement>(null)
+    const tickerRef = useRef<HTMLDivElement>(null)
+    const leftTickerRef = useRef<HTMLDivElement>(null)
+    const rightDividerRef = useRef<HTMLDivElement>(null)
+
+    const moatChatRef = useRef<MoatChatRef>(null)
+
+    // --- NEW LAYOUT CONFIGURATION FUNCTIONS ---
+    const getLayoutConfig = (mode: string) => {
+        switch (mode) {
+            case "jd-chat":
+                return {
+                    left: 50,
+                    center: 50,
+                    right: 0,
+                    showLeft: true,
+                    showCenter: true,
+                    showRight: false,
+                }
+            case "resume-chat":
+                return {
+                    left: 0,
+                    center: 50,
+                    right: 50,
+                    showLeft: false,
+                    showCenter: true,
+                    showRight: true,
+                }
+            case "three-panel":
+            default:
+                return {
+                    left: 32,
+                    center: 36,
+                    right: 32,
+                    showLeft: true,
+                    showCenter: true,
+                    showRight: true,
+                }
+        }
+    }
+
+    const switchLayout = (mode: "three-panel" | "jd-chat" | "resume-chat") => {
+        // Toggle behavior: if clicking the same layout button, return to three-panel
+        const newMode = layoutMode === mode ? "three-panel" : mode
+        setLayoutMode(newMode)
+        const config = getLayoutConfig(newMode)
+        setLeftWidth(config.left)
+        setCenterWidth(config.center)
+        setRightWidth(config.right)
+        setShowLeftPanel(config.showLeft)
+        setShowRightPanel(config.showRight)
+        setIsChatPopupOpen(false)
+        setIsPanelExtended(false)
+        setActivePanelZ(null)
+    }
+
+    useEffect(() => {
+        const updateWidthsOnResize = () => {
+            if (!containerRef.current) return
+            const containerWidth =
+                containerRef.current.getBoundingClientRect().width
+            const {
+                adjustedLeftWidth,
+                adjustedCenterWidth,
+                adjustedRightWidth,
+            } = getAdjustedWidths(
+                containerWidth,
+                leftWidth,
+                centerWidth,
+                rightWidth
+            )
+            setLeftWidth(adjustedLeftWidth)
+            setCenterWidth(adjustedCenterWidth)
+            setRightWidth(adjustedRightWidth)
+        }
+        updateWidthsOnResize()
+        window.addEventListener("resize", updateWidthsOnResize)
+        return () => window.removeEventListener("resize", updateWidthsOnResize)
+    }, [leftWidth, centerWidth, rightWidth])
+
+    const handleLogoClick = useCallback(() => {
+        setTimeout(() => {
+            if (isPanelExtended) {
+                setLeftWidth(32)
+                setCenterWidth(36)
+                setRightWidth(32)
+                setActivePanelZ(null)
+                setIsChatPopupOpen(false)
+                setIsPanelExtended(false)
+            } else {
+                setLeftWidth(50)
+                setCenterWidth(0)
+                setRightWidth(50)
+                setActivePanelZ("right")
+                setIsChatPopupOpen(true)
+                setIsPanelExtended(true)
+                setShowRightPanel(true)
+                setShowLeftPanel(true)
+            }
+            if (centerPanelRef.current && containerRef.current) {
+                const containerWidth =
+                    containerRef.current.getBoundingClientRect().width
+                const newCenterPixelWidth = (containerWidth * centerWidth) / 100
+            }
+            if (containerRef.current) {
+                containerRef.current.offsetHeight
+            }
+        }, 10)
+    }, [isPanelExtended, centerWidth])
+
+    // Toggles the center chat panel to fill the full width, hiding the
+    // left/right panels. Derived from current widths (no new state) so it
+    // can never desync with switchLayout, handleLogoClick, or manual
+    // divider drags — it just reads leftWidth/rightWidth at click time.
+    const toggleChatExpand = useCallback(() => {
+        const isCurrentlyExpanded = leftWidth === 0 && rightWidth === 0
+        if (isCurrentlyExpanded) {
+            setLeftWidth(32)
+            setCenterWidth(36)
+            setRightWidth(32)
+            setShowLeftPanel(true)
+            setShowRightPanel(true)
+        } else {
+            setLeftWidth(0)
+            setCenterWidth(100)
+            setRightWidth(0)
+            setShowLeftPanel(false)
+            setShowRightPanel(false)
+        }
+    }, [leftWidth, rightWidth])
+
+    const handleMoatPlusClick = useCallback(() => {
+        console.log("handleMoatPlusClick: Setting isMoatPlusTier to true")
+        setIsMoatPlusTier(true)
+    }, [])
+
+    const handleEffectTrigger = useCallback((button: string | null) => {
+        setEffectTrigger((prev) => ({
+            counter: prev.counter + 1,
+            button: button,
+        }))
+    }, [])
+
+    const handleSoundTextTrigger = useCallback(
+        (text: string) => {
+            setChatMessages((prev) => [...prev, { user: text }])
+            handleEffectTrigger("soundbite")
+        },
+        [handleEffectTrigger]
+    )
+
+    const updateApexScoreboard = useCallback(
+        (score: { pre: number; post: number }, source: string) => {
+            console.log(`SovrController: Updating ${source} score:`, score)
+            setScores((prevScores) => ({ ...prevScores, [source]: score }))
+        },
+        []
+    )
+
+    const filteredTickerData = {
+        filteredTuning: {
+            RELV: combinedTuning.RELV || 0,
+            EDUC: combinedTuning.EDUC || 0,
+            SKIL: combinedTuning.SKIL || 0,
+            FRMT: combinedTuning.FRMT || 0,
+            KYWD: combinedTuning.KYWD || 0,
+            IMPT: combinedTuning.IMPT || 0,
+            CLTO: combinedTuning.CLTO || 0,
+            COAC: combinedTuning.COAC || 0,
+            STRG: combinedTuning.STRG || 0,
+            LDRS: combinedTuning.LDRS || 0,
+            ANLY: combinedTuning.ANLY || 0,
+            INNO: combinedTuning.INNO || 0,
+            STKH: combinedTuning.STKH || 0,
+            GLOB: combinedTuning.GLOB || 0,
+            COMM: combinedTuning.COMM || 0,
+            PROG: combinedTuning.PROG || 0,
+            INCN: combinedTuning.INCN || 0,
+            EVRY: combinedTuning.EVRY || 0,
+            HERO: combinedTuning.HERO || 0,
+            CARE: combinedTuning.CARE || 0,
+            EXPL: combinedTuning.EXPL || 0,
+            REBL: combinedTuning.REBL || 0,
+            LOVR: combinedTuning.LOVR || 0,
+            CREA: combinedTuning.CREA || 0,
+            JEST: combinedTuning.JEST || 0,
+            SAGE: combinedTuning.SAGE || 0,
+            MAGI: combinedTuning.MAGI || 0,
+            RULR: combinedTuning.RULR || 0,
+            ARCH_TOT_PRE: combinedTuning.ARCH_TOT_PRE || 0,
+            ARCH_TOT_POST: combinedTuning.ARCH_TOT_POST || 0,
+            TOT: combinedTuning.TOT || 0,
+            INVT: combinedTuning.INVT || 0,
+            RSIL: combinedTuning.RSIL || 0,
+            ADPT: combinedTuning.ADPT || 0,
+            EMPT: combinedTuning.EMPT || 0,
+            COLL: combinedTuning.COLL || 0,
+            INFL: combinedTuning.INFL || 0,
+            ANLT: combinedTuning.ANLT || 0,
+            JUDG: combinedTuning.JUDG || 0,
+            ACCT: combinedTuning.ACCT || 0,
+            CRIT: combinedTuning.CRIT || 0,
+            VALU: combinedTuning.VALU || 0,
+            CURS: combinedTuning.CURS || 0,
+            BEHR_TOT_PRE: combinedTuning.BEHR_TOT_PRE || 0,
+            BEHR_TOT_POST: combinedTuning.BEHR_TOT_POST || 0,
+        },
+        filteredDescriptions: {
+            RELV: "Experience Relevance",
+            EDUC: "Educational Background",
+            SKIL: "Skill Set Compatibility",
+            FRMT: "Formatting & Style",
+            KYWD: "Keyword Optimization",
+            IMPT: "Quantifiable Achievements",
+            CLTO: "Clarity & Tone",
+            COAC: "Consistency & Accuracy",
+            STRG: "Strategic Impact",
+            LDRS: "Leadership & Influence",
+            ANLY: "Analytical Rigor",
+            INNO: "Innovation & Change Management",
+            STKH: "Client & Stakeholder Engagement",
+            GLOB: "Global & Cross-Cultural Competence",
+            COMM: "Executive Communication",
+            PROG: "Professional Trajectory",
+            INCN: "Innocent",
+            EVRY: "Everyman",
+            HERO: "Hero",
+            CARE: "Caregiver",
+            EXPL: "Explorer",
+            REBL: "Rebel",
+            LOVR: "Lover",
+            CREA: "Creator",
+            JEST: "Jester",
+            SAGE: "Sage",
+            MAGI: "Magician",
+            RULR: "Ruler",
+            TOT: "Career Arc Total",
+            INVT: "Inventive",
+            RSIL: "Resilience",
+            ADPT: "Adaptability",
+            EMPT: "Empathy",
+            COLL: "Collaboration",
+            INFL: "Influence",
+            ANLT: "Analytical",
+            JUDG: "Judgment",
+            ACCT: "Accountability",
+            CRIT: "Critical Thinking",
+            VALU: "Value Alignment",
+            CURS: "Curiosity",
+        },
+    }
+
+    useEffect(() => {
+        if (
+            filteredTickerData.filteredTuning &&
+            Object.keys(filteredTickerData.filteredTuning).length >= 41
+        ) {
+            setIsTickerDataReady(true)
+        } else {
+            setIsTickerDataReady(false)
+        }
+    }, [combinedTuning])
+
+    useEffect(() => {
+        if (typeof window !== "undefined") {
+            try {
+                const hasVisited = localStorage.getItem("moät_user_has_visited")
+                if (!hasVisited) {
+                    localStorage.setItem("moät_user_has_visited", "true")
+                    setChatVisible(true)
+                } else {
+                    setTimeout(() => setChatVisible(true), 1500)
+                }
+            } catch (error) {
+                console.error("LocalStorage access failed:", error)
+                setChatVisible(true)
+            }
+        } else {
+            setChatVisible(true)
+        }
+    }, [])
+
+    useEffect(() => {
+        const calculateDuration = () => {
+            let contentWidth = 0
+            if (tickerRef.current) contentWidth = tickerRef.current.scrollWidth
+            if (leftTickerRef.current)
+                contentWidth = Math.max(
+                    contentWidth,
+                    leftTickerRef.current.scrollWidth
+                )
+            contentWidth = Math.max(contentWidth, 800)
+            if (activeRightPanel === "executive") {
+                contentWidth = 800
+                setAnimationDuration(contentWidth / 10)
+            } else {
+                setAnimationDuration(contentWidth / 50)
+            }
+        }
+        const rafId = requestAnimationFrame(() =>
+            requestAnimationFrame(calculateDuration)
+        )
+        window.addEventListener("resize", calculateDuration)
+        return () => {
+            cancelAnimationFrame(rafId)
+            window.removeEventListener("resize", calculateDuration)
+        }
+    }, [activeRightPanel])
+
+    type Scores = {
+        industryScore: { pre: number; post: number }
+        executiveScore: { pre: number; post: number }
+        archetypeScore: { pre: number; post: number }
+        careerArcScore: { pre: number; post: number }
+        behavioralScore: { pre: number; post: number }
+    }
+
+    const calculateApexIndex = (scores: Scores) => {
+        const panelScores = [
+            scores.industryScore.post,
+            scores.executiveScore.post,
+            scores.archetypeScore.post,
+            scores.behavioralScore.post,
+            scores.careerArcScore.post,
+        ].filter((score) => score > 0)
+        return panelScores.length
+            ? Math.round(
+                  panelScores.reduce((a, b) => a + b, 0) / panelScores.length
+              )
+            : 0
+    }
+
+    const sliderStyle = {
+        appearance: "none",
+        width: "100%",
+        height: 4,
+        background: "#333",
+        borderRadius: 2,
+        cursor: "pointer",
+    } as React.CSSProperties
+
+    const cssStyles = `
+        html, body, #root {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden !important; /* 🔒 Stops the page from scrolling */
+    overscroll-behavior: none;   /* 🔒 Stops the "rubber band" bounce on iPad */
+    position: fixed;             /* 🔒 Locks the viewport */
+}
+        input[type="range"] { -webkit-appearance: none; appearance: none; background: #333; width: 100%; height: 4px; border-radius: 2px; }
+        input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 6px; height: 14px; background: #000; box-shadow: 0 0 6px rgba(0, 255, 194, 0.4), inset 2px 0 0 #fff; cursor: pointer; position: relative; z-index: 2; margin-top: -5px; }
+        input[type="range"]::-moz-range-thumb { width: 6px; height: 14px; background: #000; box-shadow: 0 0 6px rgba(0, 255, 194, 0.4), inset 2px 0 0 #fff; cursor: pointer; position: relative; z-index: 2; border: none; }
+        input[type="range"]:active::-webkit-slider-thumb { box-shadow: 0 0 10px rgba(0, 255, 194, 0.7), inset 2px 0 0 #fff; }
+        input[type="range"]:active::-moz-range-thumb { box-shadow: 0 0 10px rgba(0, 255, 194, 0.7), inset 2px 0 0 #fff; }
+        input[type="range"]:focus { outline: none; }
+        @-webkit-keyframes ticker { 0% { -webkit-transform: translateX(0); transform: translateX(0); } 100% { -webkit-transform: translateX(-100%); transform: translateX(-100%); } }
+        @keyframes ticker { 0% { transform: translateX(0); } 100% { transform: translateX(-100%); } }
+        @-webkit-keyframes blink { 0%, 100% { opacity: 1; text-shadow: 0 0 10px rgba(0, 255, 194, 0.8); } 50% { opacity: 0.3; text-shadow: 0 0 4px rgba(0, 255, 194, 0.4); } }
+        @keyframes blink { 0%, 100% { opacity: 1; text-shadow: 0 0 4px rgba(255, 255, 255, 0.4); } 50% { opacity: 0.88; text-shadow: 0 0 6px rgba(255, 255, 255, 0.6); } }
+        @-webkit-keyframes glowBlink { 0%, 100% { text-shadow: 0 0 5px #00FFC2, 0 0 10px #00FFC2; opacity: 1; } 50% { text-shadow: 0 0 2px #00FFC2, 0 0 5px #00FFC2; opacity: 0.7; } }
+        @keyframes glowBlink { 0%, 100% { text-shadow: 0 0 5px #00FFC2, 0 0 10px #00FFC2; opacity: 1; } 50% { text-shadow: 0 0 2px #00FFC2, 0 0 5px #00FFC2; opacity: 0.7; } }
+        @-webkit-keyframes logoGlow { 0%, 100% { filter: drop-shadow(0 0 4px rgba(0, 255, 194, 0.3)); } 50% { filter: drop-shadow(0 0 8px rgba(0, 255, 194, 0.5)); } }
+        @keyframes logoGlow { 0%, 100% { filter: drop-shadow(0 0 4px rgba(0, 255, 194, 0.3)); } 50% { filter: drop-shadow(0 0 8px rgba(0, 255, 194, 0.5)); } }
+        @-webkit-keyframes logoGlowWhite { 0%, 100% { filter: drop-shadow(0 0 4px rgba(255, 255, 255, 0.3)); } 50% { filter: drop-shadow(0 0 8px rgba(255, 255, 255, 0.5)); } }
+        @keyframes logoGlowWhite { 0%, 100% { filter: drop-shadow(0 0 4px rgba(255, 255, 255, 0.3)); } 50% { filter: drop-shadow(0 0 8px rgba(255, 255, 255, 0.5)); } }
+        @-webkit-keyframes logoBlink { 0%, 100% { filter: drop-shadow(0 0 5px rgba(0, 255, 194, 0.6)); opacity: 1; } 50% { filter: drop-shadow(0 0 2px rgba(0, 255, 194, 0.2)); opacity: 0.9; } }
+        @keyframes logoBlink { 0%, 100% { filter: drop-shadow(0 0 5px rgba(0, 255, 194, 0.6)); opacity: 1; } 50% { filter: drop-shadow(0 0 2px rgba(0, 255, 194, 0.2)); opacity: 0.9; } }
+        @-webkit-keyframes glowGreen { 0%, 100% { text-shadow: 0 0 5px #00FFC2, 0 0 10px #00FFC2; opacity: 1; } 50% { text-shadow: 0 0 2px #00FFC2, 0 0 5px #00FFC2; opacity: 0.7; } }
+        @keyframes glowGreen { 0%, 100% { text-shadow: 0 0 5px #00FFC2, 0 0 10px #00FFC2; opacity: 1; } 50% { text-shadow: 0 0 2px #00FFC2, 0 0 5px #00FFC2; opacity: 0.7; } }
+        @-webkit-keyframes glowPink { 0%, 100% { text-shadow: 0 0 5px #F511BC, 0 0 10px #F511BC; opacity: 1; } 50% { text-shadow: 0 0 2px #F511BC, 0 0 5px #F511BC; opacity: 0.7; } }
+        @keyframes glowPink { 0%, 100% { text-shadow: 0 0 5px #F511BC, 0 0 10px #F511BC; opacity: 1; } 50% { text-shadow: 0 0 2px #F511BC, 0 0 5px #F511BC; opacity: 0.7; } }
+        @-webkit-keyframes glowWhite { 0%, 100% { text-shadow: 0 0 5px #FFFFFF, 0 0 10px #FFFFFF; opacity: 1; } 50% { text-shadow: 0 0 2px #FFFFFF, 0 0 5px #FFFFFF; opacity: 0.7; } }
+        @keyframes glowWhite { 0%, 100% { text-shadow: 0 0 5px #FFFFFF, 0 0 10px #FFFFFF; opacity: 1; } 50% { text-shadow: 0 0 2px #FFFFFF, 0 0 5px #FFFFFF; opacity: 0.7; } }
+        .vira-deck-1-button-base { position: relative; width: auto; height: 24px; background: url('https://pub-bc72743f8cde45919b8affea99808ed9.r2.dev/gray-empty-blur-template-circle.jpeg'); background-size: cover; background-position: center; border-radius: 2px; border: 1px solid #2a2a2a; display: flex; align-items: center; justify-content: center; cursor: pointer; user-select: none; transition: transform 0.1s ease, background 0.3s ease; padding: 0 8px; }
+        .vira-deck-1-button-base:hover { background: url('https://pub-bc72743f8cde45919b8affea99808ed9.r2.dev/gray-empty-blur-template-circle.jpeg'); background-size: cover; background-position: center; }
+        .vira-deck-1-button-base:active { transform: translateY(1px); background: url('https://pub-bc72743f8cde45919b8affea99808ed9.r2.dev/gray-empty-blur-template-circle.jpeg'); background-size: cover; background-position: center; }
+        .vira-deck-1-button-base:focus, .vira-deck-1-button-base:active { outline: none; -webkit-tap-highlight-color: transparent; }
+        .vira-deck-1-button-text { font-size: 10px; font-weight: bold; text-align: center; text-transform: uppercase; background: none; user-select: none; }
+        .vira-deck-1-button-text:focus, .vira-deck-1-button-text:active { background: none; outline: none; -webkit-tap-highlight-color: transparent; }
+        .vira-deck-1-button-text::selection, .vira-deck-1-button-base::selection { background: transparent; }
+        .vira-deck-1-button-green { box-shadow: none; }
+        .vira-deck-1-button-green:hover, .vira-deck-1-button-green:active { box-shadow: none; }
+        .vira-deck-1-button-pink { box-shadow: none; }
+        .vira-deck-1-button-pink:hover, .vira-deck-1-button-pink:active { box-shadow: none; }
+        .vira-deck-1-button-white { box-shadow: none; }
+        .vira-deck-1-button-white:hover, .vira-deck-1-button-white:active { box-shadow: none; }
+        .top-collapsible-bar .panel-dot-container { display: flex; gap: 8px; align-items: center; }
+        @media (max-width: 768px) { .panel-container, .panel-layout, .panel-section { flex-direction: column !important; width: 100% !important; min-width: 100% !important; max-width: 100% !important; } .INDUPanel, .EXECPanel, .ARCHPanel, .CARCPanel, .BEHRPanel { width: 100% !important; min-width: 100% !important; max-width: 100% !important; margin-bottom: 10px !important; } .divider { display: block !important; } .moat-logo { width: 35px !important; height: 35px !important; margin-right: 10px; } .ticker-container, .top-collapsible-bar, .moat-dj-panel, .chatbox-container, .moat-sound-panel, .right-panel-container { width: 100% !important; max-width: none !important; } .chatbox-popup { width: 90% !important; height: 400px !important; max-width: none !important; min-width: 200px !important; min-height: 150px !important; } .framer-media-shortcuts-container { gap: 20px !important; } .framer-media-shortcut, .moat-logo { width: 35px !important; height: 35px !important; } .framer-media-shortcut img, .moat-logo img { width: 35px !important; height: 35px !important; } }
+        .header { position: fixed; top: 0; left: 0; right: 0; height: 50px; padding: 0; background: linear-gradient(180deg, #000000, #111111); display: flex; align-items: center; justify-content: space-between; z-index: 10; box-shadow: inset 0 0 8px rgba(0, 0, 0, 0.8); border-left: 1px solid #333; border-right: 1px solid #333; }
+        .logo-container { display: flex; justify-content: center; padding: 10px 0; }
+        .center-logo { height: 30px; }
+        .moat-logo { width: 35px; height: 35px; margin-right: 20px; cursor: pointer; background: transparent; transition: filter: 0.3s ease; }
+        .moat-logo:hover { animation: logoGlowWhite 2.0s ease-in-out infinite; }
+        .moat-logo:active { animation: logoBlink 0.5s ease-in-out 2; }
+        .dj-button-container { display: grid; grid-template-columns: repeat(6, 1fr); grid-template-rows: repeat(2, 1fr); gap: 10px; width: calc(100% - 40px); height: 110px; justify-items: center; align-items: center; margin: 20px 20px; }
+        .dj-button { width: 100%; height: 50px; border: none; cursor: pointer; transition: all 0.3s ease; box-shadow: 3px 3px 6px rgba(0, 0, 0, 0.4), -2px -2px 4px rgba(255, 255, 255, 0.2), inset 2px 2px 4px rgba(255, 255, 255, 0.3), inset -2px -2px 4px rgba(0, 0, 0, 0.2), inset 1px 0 0 #000; }
+        .dj-button:active { box-shadow: inset 2px 2px 4px rgba(0, 0, 0, 0.3), inset -2px -2px 4px rgba(255, 255, 0, 0.1), 0 1px 2px rgba(0, 0, 0, 0.2); }
+        .dj-button-green { box-shadow: 0 0 12px rgba(0, 255, 194, 0.8), 3px 3px 6px rgba(0, 0, 0, 0.4), -2px -2px 4px rgba(255, 255, 255, 0.2), inset 2px 2px 4px rgba(255, 255, 255, 0.3), inset -2px -2px 4px rgba(0, 0, 0, 0.2), inset 1px 0 0 #000, inset 0 1px 0 #000; }
+        .dj-button-green:hover { box-shadow: 0 0 14.4px rgba(0, 255, 194, 1), 3px 3px 6px rgba(0, 0, 0, 0.4), -2px -2px 4px rgba(255, 255, 255, 0.2), inset 2px 2px 4px rgba(255, 255, 255, 0.3), inset -2px -2px 4px rgba(0, 0, 0, 0.2), inset 1px 0 0 #000, inset 0 1px 0 #000; }
+        .dj-button-red { box-shadow: 0 0 12px rgba(255, 0, 0, 0.8), 3px 3px 6px rgba(0, 0, 0, 0.4), -2px -2px 4px rgba(255, 255, 255, 0.2), inset 2px 2px 4px rgba(255, 255, 255, 0.3), inset -2px -2px 4px rgba(0, 0, 0, 0.2), inset 1px 0 0 #000, inset 0 1px 0 #000; }
+        .dj-button-red:hover { box-shadow: 0 0 14.4px rgba(255, 0, 0, 1), 3px 3px 6px rgba(0, 0, 0, 0.4), -2px -2px 4px rgba(255, 255, 255, 0.2), inset 2px 2px 4px rgba(255, 255, 255, 0.3), inset -2px -2px 4px rgba(0, 0, 0, 0.2), inset 1px 0 0 #000, inset 0 1px 0 #000; }
+        .dj-button-blue { box-shadow: 0 0 12px rgba(0, 0, 255, 0.8), 3px 3px 6px rgba(0, 0, 0, 0.4), -2px -2px 4px rgba(255, 255, 255, 0.2), inset 2px 2px 4px rgba(255, 255, 255, 0.3), inset -2px -2px 4px rgba(0, 0, 0, 0.2), inset 1px 0 0 #000, inset 0 1px 0 #000; }
+        .dj-button-blue:hover { box-shadow: 0 0 14.4px rgba(0, 0, 255, 1), 3px 3px 6px rgba(0, 0, 0, 0.4), -2px -2px 4px rgba(255, 255, 255, 0.2), inset 2px 2px 4px rgba(255, 255, 255, 0.3), inset -2px -2px 4px rgba(0, 0, 0, 0.2), inset 1px 0 0 #000, inset 0 1px 0 #000; }
+        .dj-button-yellow { box-shadow: 0 0 12px rgba(255, 255, 0, 0.8), 3px 3px 6px rgba(0, 0, 0, 0.4), -2px -2px 4px rgba(255, 255, 255, 0.2), inset 2px 2px 4px rgba(255, 255, 255, 0.3), inset -2px -2px 4px rgba(0, 0, 0, 0.2), inset 1px 0 0 #000, inset 0 1px 0 #000; }
+        .dj-button-yellow:hover { box-shadow: 0 0 14.4px rgba(255, 255, 0, 1), 3px 3px 6px rgba(0, 0, 0, 0.4), -2px -2px 4px rgba(255, 255, 255, 0.2), inset 2px 2px 4px rgba(255, 255, 255, 0.3), inset -2px -2px 4px rgba(0, 0, 0, 0.2), inset 1px 0 0 #000, inset 0 1px 0 #000; }
+        .dj-button-purple { box-shadow: 0 0 12px rgba(128, 0, 128, 0.8), 3px 3px 6px rgba(0, 0, 0, 0.4), -2px -2px 4px rgba(255, 255, 255, 0.2), inset 2px 2px 4px rgba(255, 255, 255, 0.3), inset -2px -2px 4px rgba(0, 0, 0, 0.2), inset 1px 0 0 #000, inset 0 1px 0 #000; }
+        .dj-button-purple:hover { box-shadow: 0 0 14.4px rgba(128, 0, 128, 1), 3px 3px 6px rgba(0, 0, 0, 0.4), -2px -2px 4px rgba(255, 255, 255, 0.2), inset 2px 2px 4px rgba(255, 255, 255, 0.3), inset -2px -2px 4px rgba(0, 0, 0, 0.2), inset 1px 0 0 #000, inset 0 1px 0 #000; }
+        .dj-button-orange { box-shadow: 0 0 12px rgba(255, 165, 0, 0.8), 3px 3px 6px rgba(0, 0, 0, 0.4), -2px -2px 4px rgba(255, 255, 255, 0.2), inset 2px 2px 4px rgba(255, 255, 255, 0.3), inset -2px -2px 4px rgba(0, 0, 0, 0.2), inset 1px 0 0 #000, inset 0 1px 0 #000; }
+        .dj-button-orange:hover { box-shadow: 0 0 14.4px rgba(255, 165, 0, 1), 3px 3px 6px rgba(0, 0, 0, 0.4), -2px -2px 4px rgba(255, 255, 255, 0.2), inset 2px 2px 4px rgba(255, 255, 255, 0.3), inset -2px -2px 4px rgba(0, 0, 0, 0.2), inset 1px 0 0 #000, inset 0 1px 0 #000; }
+        .dj-button-white { box-shadow: 0 0 12px rgba(255, 255, 255, 0.8), 3px 3px 6px rgba(0, 0, 0, 0.4), -2px -2px 4px rgba(255, 255, 255, 0.2), inset 2px 2px 4px rgba(255, 255, 255, 0.3), inset -2px -2px 4px rgba(0, 0, 0, 0.2), inset 1px 0 0 #000, inset 0 1px 0 #000; }
+        .dj-button-white:hover { box-shadow: 0 0 14.4px rgba(255, 255, 255, 1), 3px 3px 6px rgba(0, 0, 0, 0.4), -2px -2px 4px rgba(255, 255, 255, 0.2), inset 2px 2px 4px rgba(255, 255, 255, 0.3), inset -2px -2px 4px rgba(0, 0, 0, 0.2), inset 1px 0 0 #000, inset 0 1px 0 #000; }
+        .dj-button-pink { box-shadow: 0 0 12px rgba(255, 105, 180, 0.8), 3px 3px 6px rgba(0, 0, 0, 0.4), -2px -2px 4px rgba(255, 255, 255, 0.2), inset 2px 2px 4px rgba(255, 255, 255, 0.3), inset -2px -2px 4px rgba(0, 0, 0, 0.2), inset 1px 0 0 #000, inset 0 1px 0 #000; }
+        .dj-button-pink:hover { box-shadow: 0 0 14.4px rgba(255, 105, 180, 1), 3px 3px 6px rgba(0, 0, 0, 0.4), -2px -2px 4px rgba(255, 255, 255, 0.2), inset 2px 2px 4px rgba(255, 255, 255, 0.3), inset -2px -2px 4px rgba(0, 0, 0, 0.2), inset 1px 0 0 #000, inset 0 1px 0 #000; }
+        .divider { width: 8px; background: #222; z-index: 100; }
+        .divider.left-divider { position: relative; }
+        .divider.right-divider { position: relative; }
+        .chatbox-iframe { background: #000000; color: #FFFFF; border: 1px solid #333 !important; min-height: 100%; }
+        .chatbox-iframe * { color: #FFFFFF !important; }
+        .chatbox-iframe::-webkit-scrollbar-thumb { background: #151515 !important; border-radius: 4px; }
+        .chatbox-iframe::-webkit-scrollbar { width: 8px; background: #151515 !important; }
+        .top-collapsible-bar { position: sticky; width: 100%; height: 28px; background: #1a1a1a; display: flex; align-items: center; border-bottom: 1px solid #2a2a2a; border-left: none; border-right: none; border-top: none; margin-top: -1px; cursor: pointer; z-index: 10; position: relative; box-sizing: border-box; overflow: visible; }
+        .top-collapsible-bar .label-container { width: 100%; display: flex; justify-content: center; align-items: center; }
+        .top-collapsible-bar .panel-dot-container { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); }
+        .top-collapsible-panel { height: 247px; width: 100%; background: #151515; border-bottom: 1px solid #2a2a2a; border-left: none; border-right: none; }
+        .moät-dj-logo { font-size: 12.8px; font-weight: bold; color: #FFFFFF; transition: all 0.3s ease; line-height: 28px; }
+        .moät-dj-logo:hover { color: #FFFFFF; animation: blink 2s ease-in-out infinite; }
+        .moät-scores-logo { font-size: 12.8px; font-weight: bold; color: #FFFFFF; transition: all 0.3s ease; line-height: 28px; }
+        .moät-scores-logo:hover { color: #FFFFFF; animation: blink 2s ease-in-out infinite; }
+        .chatbox-container { margin: 8px 8px 8px; flex: 1; overflow: hidden; width: 100%; box-sizing: border-box; }
+        .ticker-container { background: #101010 !important; width: 100%; height: 30px; overflow: hidden; box-sizing: border-box; }
+        .ticker-content { display: inline-flex; white-space: nowrap; will-change: transform; max-height: 30px; line-height: 30px; background: transparent; }
+        .ticker-content:hover { animation-play-state: paused; }
+        .ticker-content > * { display: inline-block; white-space: nowrap; }
+        .ticker-content .score-ticker > * { display: inline-block; white-space: nowrap; margin-right: 20px; }
+        .ticker-content .score-ticker > *:last-child { margin-right: 0; }
+        .panel-dot { width: 7px; height: 7px; border-radius: 50%; cursor: pointer; transition: all 0.3s ease; padding: 4px; }
+        .panel-dot.active { width: 10px; height: 10px; }
+        .panel-dot:hover:not(.active) { transform: scale(1.14); }
+        .panel-dot.moat-green { background: #00FFC2; box-shadow: 0 0 2px #00FFC2; }
+        .panel-dot.moat-green.active { box-shadow: 0 0 4px #00FFC2; }
+        .panel-dot.moat-pink { background: #F511BC; box-shadow: 0 0 2px #F511BC; }
+        .panel-dot.moat-pink.active { box-shadow: 0 0 4px #F511BC; }
+        .panel-dot.white { background: #FFFFFF; box-shadow: 0 0 2px #FFFFFF; }
+        .panel-dot.white.active { box-shadow: 0 0 4px #FFFFFF; }
+        .panel-dot.exec-moat-pink { background: #F511BC; box-shadow: 0 0 2px #F511BC; }
+        .panel-dot.exec-moat-pink.active { box-shadow: 0 0 4px #F511BC; }
+        .panel-dot-container { display: flex; gap: 8px; align-items: center; }
+        .insight-panel { width: 100%; height: 150px; background: #1a1a1a; border-radius: 8px; padding: 16px; overflow: auto; transition: opacity 0.3s ease; }
+        .right-panel-container { display: flex; justify-content: space-between; padding: 0; gap: 0; border-bottom: 1px solid #2a2a2a; flex-wrap: nowrap; width: 100%; overflow: hidden; box-sizing: border-box; }
+        .INDUPanel { flex: 1; min-width: 200px; background: #1a1a1a; padding: 16px; border-radius: 4px; height: 220px; display: flex; flex-direction: column; }
+        .EXECPanel { flex: 1; min-width: 200px; background: #1c1c1c; padding: 16px; border-radius: 4px; height: 220px; display: flex; flex-direction: column; }
+        .ARCHPanel { flex: 1; min-width: 200px; background: #1a1a1a; padding: 16px; border-radius: 4px; height: 220px; display: flex; flex-direction: column; }
+        .CARCPanel { flex: 1; min-width: 200px; background: #1a1a1a; padding: 16px; border-radius: 4px; height: 220px; display: flex; flex-direction: column; }
+        .BEHRPanel { flex: 1; min-width: 200px; background: #1a1a1a; padding: 16px; border-radius: 4px; height: 220px; display: flex; flex-direction: column; }
+        .moat-dj-panel { width: 100%; }
+        .chatbox-container { width: 100%; flex: 1; overflow: hidden; box-sizing: border-box; }
+        .panel-section { position: relative; box-sizing: border-box; }
+        .center-content-wrapper { width: 100%; }
+        .chatbox-popup { position: fixed; width: 600px; height: 500px; background: #000000; border: 1px solid #333; border-radius: 12px; z-index: 1000; box-shadow: 0 0 20px rgba(0, 0, 0, 0.5); display: flex; flex-direction: column; resize: both; overflow: hidden; min-width: 300px; min-height: 200px; max-width: 90vw; max-height: 90vh; }
+        .chatbox-popup-header { display: flex; justify-content: space-between; align-items: center; padding: 10px; background: #000000; border-bottom: 1px solid #FFFFFF; flex-shrink: 0; cursor: move; user-select: none; }
+        .chatbox-popup-title { color: #fff; font-size: 16px; font-weight: bold; font: Satoshi; }
+        .chatbox-popup-close { color: #aaa; font-size: 20px; cursor: pointer; }
+        .chatbox-popup-close:hover { color: #fff; }
+        .chatbox-popup-content { flex: 1; padding: 10px; overflow: hidden; display: flex; flex-direction: column; }
+        .chatbox-popup-content iframe { flex: 1; width: 100%; height: 100%; border: none; border-radius: 12px; }
+     .framer-media-shortcuts-container { display: flex !important; flex-wrap: nowrap !important; align-items: center !important; justify-content: flex-end !important; padding: 0 12px !important; overflow: visible !important; margin: 0 !important; height: 100% !important;}
+        .framer-media-shortcuts-container a, .framer-media-shortcuts-container div { margin: 0; padding: 0 !important; display: flex !important; align-items: center !important; justify-content: center !important; position: relative !important; }
+        .framer-media-shortcut { width: 35px !important; height: 35px !important; min-width: 35px !important; min-height: 35px !important; cursor: pointer !important; display: flex !important; align-items: center !important; justify-content: center !important; transition: transform 0.3s ease !important; margin: 0; padding: 0 !important; box-sizing: border-box !important; }
+        .framer-media-shortcut:hover { transform: scale(1.1); }
+        .framer-media-shortcut img { max-width: 35px !important; max-height: 35px !important; object-fit: contain !important; display: block !important; margin: 0 !important; padding: 0 !important; }
+        .framer-media-shortcut.profile-icon { width: 26px !important; height: 26px !important; min-width: 26px !important; min-height: 26px !important; }
+
+/* Layout button hover effects */
+.framer-media-shortcut.moat-logo-layout:hover img {
+    opacity: 0.9 !important;
+}
+
+/* First moat logo (JD+Chat) - Green hover */
+.framer-media-shortcut.moat-logo-layout:first-child:hover img {
+    filter: drop-shadow(0 0 10px rgba(0, 255, 194, 0.6))  !important;
+}
+
+/* Reduce gap for first button */
+.framer-media-shortcut.moat-logo-layout:first-child {
+    margin-right: -5px !important;
+}
+
+/* Second moat logo (Resume+Chat) - Pink hover */
+.framer-media-shortcut.moat-logo-layout:nth-child(2):hover img {
+    filter: drop-shadow(0 0 10px rgba(245, 17, 188, 0.6)) !important;
+}
+
+/* Reduce gap for second button */
+.framer-media-shortcut.moat-logo-layout:nth-child(2){
+    margin-right: -5px !important;
+}
+
+/* Third moat logo - White hover */
+.framer-media-shortcut.moat-logo-layout:nth-child(3):hover img {
+    filter: drop-shadow(0 0 10px rgba(255, 255, 255, 0.8)) !important;
+}
+
+/* Reduce gap for third button */
+.framer-media-shortcut.moat-logo-layout:nth-child(3) {
+    margin-right: -5px !important;
+}
+
+
+.moat-logo { left: -5px !important; }
+
+/* Universal height fix for all devices */
+.panel-section {
+  min-height: 0 !important;
+  flex-shrink: 1 !important;
+}
+
+    `
+
+    const useDrag = (initialPos: { x: number; y: number }) => {
+        const [position, setPosition] = useState(initialPos)
+        const [isDragging, setIsDragging] = useState(false)
+        const [dragStart, setDragStart] = useState({ x: 0, y: 0 })
+        const handleMouseDown = (e: React.MouseEvent) => {
+            setIsDragging(true)
+            setDragStart({
+                x: e.clientX - position.x,
+                y: e.clientY - position.y,
+            })
+        }
+        const handleMouseMove = (e: MouseEvent) => {
+            if (!isDragging) return
+            const newX = e.clientX - dragStart.x
+            const newY = e.clientY - dragStart.y
+            if (typeof window !== "undefined") {
+                const boundedX = Math.max(
+                    0,
+                    Math.min(newX, window.innerWidth - 600)
+                )
+                const boundedY = Math.max(
+                    0,
+                    Math.min(newY, window.innerHeight - 500)
+                )
+                setPosition({ x: boundedX, y: boundedY })
+            } else {
+                setPosition({ x: newX, y: newY })
+            }
+        }
+        const handleMouseUp = () => {
+            setIsDragging(false)
+        }
+        useEffect(() => {
+            if (typeof window === "undefined") return
+            if (isDragging) {
+                window.addEventListener("mousemove", handleMouseMove)
+                window.addEventListener("mouseup", handleMouseUp)
+            }
+            return () => {
+                window.removeEventListener("mousemove", handleMouseMove)
+                window.removeEventListener("mouseup", handleMouseUp)
+            }
+        }, [isDragging, dragStart])
+        return { position, handleMouseDown }
+    }
+
+    const [position, setPosition] = useState({ x: 0, y: 0 })
+
+    useEffect(() => {
+        if (typeof window === "undefined") return
+        const initialX = window.innerWidth / 2 - 300
+        const initialY = window.innerHeight / 2 - 250
+        setPosition({ x: initialX, y: initialY })
+    }, [])
+
+    const { position: dragPosition, handleMouseDown } = useDrag(position)
+    const ErrorBoundaryComponent = ErrorBoundary
+    const [centerPixelWidth, setCenterPixelWidth] = useState(0)
+
+    useEffect(() => {
+        if (typeof window === "undefined") return
+        if (containerRef.current) {
+            const containerWidth =
+                containerRef.current.getBoundingClientRect().width
+            const { adjustedCenterWidth } = getAdjustedWidths(
+                containerWidth,
+                leftWidth,
+                centerWidth,
+                rightWidth
+            )
+            const pixelWidth = (adjustedCenterWidth / 100) * containerWidth
+            setCenterPixelWidth(pixelWidth)
+            document.documentElement.style.setProperty(
+                "--center-width",
+                pixelWidth.toString()
+            )
+        }
+    }, [leftWidth, centerWidth, rightWidth])
+
+    // --- FIX 3: THE HIDDEN BUG - SMART STATE-WRITER FOR CHAT ---
+    const handleSliderChangeFromChat = (ticker: string, value: number) => {
+        if (industryKeys.has(ticker)) {
+            setIndustryTuning((prev) => ({ ...prev, [ticker]: value }))
+        } else if (executiveKeys.has(ticker)) {
+            setExecutiveTuning((prev) => ({ ...prev, [ticker]: value }))
+        } else if (archetypeKeys.has(ticker)) {
+            setArchetypeTuning((prev) => ({ ...prev, [ticker]: value }))
+        } else if (careerArcKeys.has(ticker)) {
+            setCareerArcTuning((prev) => ({ ...prev, [ticker]: value }))
+        } else if (behavioralKeys.has(ticker)) {
+            setBehavioralTuning((prev) => ({ ...prev, [ticker]: value }))
+        }
+    }
+    const startResize = (e: React.MouseEvent | React.TouchEvent) => {
+        e.stopPropagation()
+        const startX = "touches" in e ? e.touches[0].clientX : e.clientX
+        const startY = "touches" in e ? e.touches[0].clientY : e.clientY
+        const startWidth = popupSize.width
+        const startHeight = popupSize.height
+
+        const handleMove = (moveEvent: MouseEvent | TouchEvent) => {
+            const currentX =
+                "touches" in moveEvent
+                    ? moveEvent.touches[0].clientX
+                    : (moveEvent as MouseEvent).clientX
+            const currentY =
+                "touches" in moveEvent
+                    ? moveEvent.touches[0].clientY
+                    : (moveEvent as MouseEvent).clientY
+
+            const newWidth = Math.max(300, startWidth + (currentX - startX))
+            const newHeight = Math.max(200, startHeight + (currentY - startY))
+
+            setPopupSize({ width: newWidth, height: newHeight })
+        }
+
+        const handleUp = () => {
+            window.removeEventListener("mousemove", handleMove)
+            window.removeEventListener("mouseup", handleUp)
+            window.removeEventListener("touchmove", handleMove)
+            window.removeEventListener("touchend", handleUp)
+        }
+
+        window.addEventListener("mousemove", handleMove)
+        window.addEventListener("mouseup", handleUp)
+        window.addEventListener("touchmove", handleMove)
+        window.addEventListener("touchend", handleUp)
+    }
+
+    return (
+        <ErrorBoundaryComponent>
+            <ResumeDataProvider>
+                <DocumentBridgeProvider
+                    fileContents={fileContents}
+                    setFileContents={setFileContents}
+                >
+                    <ATSProvider>
+                        <div
+                            style={{
+                                display: "flex",
+                                height: "100%",
+                                width: "100%",
+                                backgroundColor: "transparent",
+                                color: "white",
+                                fontFamily:
+                                    "'Satoshi', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
+                                overflow: "hidden",
+                            }}
+                        >
+                            <style>{cssStyles}</style>
+                            <div className="header">
+                                <div
+                                    style={{
+                                        marginLeft: "-20px",
+                                        display: "flex",
+                                        alignItems: "center",
+                                        height: "100%",
+                                        overflow: "visible",
+                                    }}
+                                >
+                                    <img
+                                        src="https://pub-bc72743f8cde45919b8affea99808ed9.r2.dev/careerdj_logo.PNG"
+                                        alt=""
+                                        style={{
+                                            height: "100px",
+                                            objectFit: "contain",
+                                        }}
+                                        onError={(e) => {
+                                            e.currentTarget.style.display =
+                                                "none"
+                                            ;(
+                                                e.currentTarget
+                                                    .nextElementSibling as HTMLElement
+                                            ).style.display = "flex"
+                                        }}
+                                    />
+                                    <div
+                                        style={{
+                                            display: "none",
+                                            marginLeft: "20px",
+                                            fontSize: "20px",
+                                            fontWeight: "bold",
+                                            alignItems: "center",
+                                            height: "100%",
+                                            color: "white",
+                                            fontFamily:
+                                                "'Satoshi', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
+                                        }}
+                                    >
+                                        {" "}
+                                        career.dj{" "}
+                                    </div>
+                                </div>
+                                <link
+                                    rel="preload"
+                                    href="https://pub-bc72743f8cde45919b8affea99808ed9.r2.dev/IMG_5447.png"
+                                    as="image"
+                                />
+                                <div className="framer-media-shortcuts-container">
+                                    {/* First Moat Logo - JD + Chat Layout */}
+                                    <div
+                                        className="framer-media-shortcut moat-logo-layout"
+                                        onClick={() => switchLayout("jd-chat")}
+                                        title="JD + Chat Layout"
+                                    >
+                                        <img
+                                            src="https://pub-bc72743f8cde45919b8affea99808ed9.r2.dev/layout_left%3Amid_button.PNG"
+                                            alt="JD + Chat"
+                                            style={{
+                                                width: "32px",
+                                                height: "32px",
+                                                margin: 0,
+                                                verticalAlign: "middle",
+                                                position: "relative",
+                                                top: "0px",
+                                                opacity:
+                                                    layoutMode === "jd-chat"
+                                                        ? 1
+                                                        : 0.6,
+                                                filter:
+                                                    layoutMode === "jd-chat"
+                                                        ? "drop-shadow(0 0 8px rgba(0, 255, 194, 0.8))"
+                                                        : "none",
+                                                transition: "all 0.3s ease",
+                                            }}
+                                        />
+                                    </div>
+
+                                    {/* Second Moat Logo - Resume + Chat Layout */}
+                                    <div
+                                        className="framer-media-shortcut moat-logo-layout"
+                                        onClick={() =>
+                                            switchLayout("resume-chat")
+                                        }
+                                        title="Resume + Chat Layout"
+                                    >
+                                        <img
+                                            src="https://pub-bc72743f8cde45919b8affea99808ed9.r2.dev/midRht.png.png"
+                                            alt="Resume + Chat"
+                                            style={{
+                                                width: "32px",
+                                                height: "32px",
+                                                marginRight: "-20px",
+                                                verticalAlign: "middle",
+                                                position: "relative",
+                                                top: "0px",
+                                                opacity:
+                                                    layoutMode === "resume-chat"
+                                                        ? 1
+                                                        : 0.6,
+                                                filter:
+                                                    layoutMode === "resume-chat"
+                                                        ? "drop-shadow(0 0 8px rgba(245, 17, 188, 0.8))"
+                                                        : "none", // CHANGED TO PINK
+                                                transition: "all 0.3s ease",
+                                            }}
+                                        />
+                                    </div>
+
+                                    {/* Third Moat Logo (Updated to match others) */}
+                                    <div
+                                        className="framer-media-shortcut moat-logo-layout"
+                                        onClick={handleLogoClick}
+                                        title="Toggle Extended View"
+                                    >
+                                        <img
+                                            src="https://pub-bc72743f8cde45919b8affea99808ed9.r2.dev/layout_LMR.PNG"
+                                            alt="Moät Logo"
+                                            style={{
+                                                width: "32px",
+                                                height: "32px",
+                                                marginRight: "0px",
+                                                verticalAlign: "middle",
+                                                position: "relative",
+                                                top: "0px",
+                                                // Keep logic: Full opacity/glow when active (Extended)
+                                                opacity: isPanelExtended
+                                                    ? 1
+                                                    : 0.6,
+                                                filter: isPanelExtended
+                                                    ? "drop-shadow(0 0 8px rgba(255, 255, 255, 0.8))"
+                                                    : "none",
+                                                transition: "all 0.3s ease",
+                                            }}
+                                        />
+                                    </div>
+                                    {/* --- NEW ADDITION: 4th Icon (Exit to Frontpage) --- */}
+                                    <a
+                                        href="https://www.careerdj.live"
+                                        className="framer-media-shortcut"
+                                        title="Exit to Frontpage"
+                                        style={{
+                                            display: "flex",
+                                            alignItems: "center",
+                                            justifyContent: "center",
+                                            textDecoration: "none",
+                                            marginLeft: "0px",
+                                            marginRight: "10px",
+                                        }}
+                                    >
+                                        <img
+                                            // white sovereignty.dj image URL
+                                            src="https://pub-bc72743f8cde45919b8affea99808ed9.r2.dev/home_wht_button.PNG"
+                                            alt="Exit"
+                                            style={{
+                                                width: "32px",
+                                                height: "32px",
+                                                objectFit: "contain",
+                                                opacity: 0.6,
+                                                transition: "all 0.3s ease",
+                                            }}
+                                            onMouseEnter={(e) => {
+                                                e.currentTarget.style.opacity =
+                                                    "1"
+                                                e.currentTarget.style.filter =
+                                                    "drop-shadow(0 0 8px rgba(255, 255, 255, 0.8))"
+                                            }}
+                                            onMouseLeave={(e) => {
+                                                e.currentTarget.style.opacity =
+                                                    "0.6"
+                                                e.currentTarget.style.filter =
+                                                    "none"
+                                            }}
+                                        />
+                                    </a>
+                                    {/* --- END NEW ADDITION --- */}
+                                    {/* --- NEW ADDITION: 5th Icon (Exit to Frontpage) --- */}
+                                    <a
+                                        href="https://www.careerdj.live"
+                                        className="framer-media-shortcut"
+                                        title="Exit to Frontpage"
+                                        style={{
+                                            display: "flex",
+                                            alignItems: "center",
+                                            justifyContent: "center",
+                                            textDecoration: "none",
+                                            marginLeft: "-14px",
+                                        }}
+                                    >
+                                        <img
+                                            // grey sovereignty.dj image URL
+                                            src="https://pub-bc72743f8cde45919b8affea99808ed9.r2.dev/foundry_blk_button.PNG"
+                                            alt="Exit"
+                                            style={{
+                                                width: "32px",
+                                                height: "32px",
+                                                objectFit: "contain",
+                                                opacity: 1.2,
+                                                transition: "all 0.3s ease",
+                                            }}
+                                            onMouseEnter={(e) => {
+                                                e.currentTarget.style.opacity =
+                                                    "1"
+                                                e.currentTarget.style.filter =
+                                                    "drop-shadow(0 0 8px rgba(255, 255, 255, 0.8))"
+                                            }}
+                                            onMouseLeave={(e) => {
+                                                e.currentTarget.style.opacity =
+                                                    "0.6"
+                                                e.currentTarget.style.filter =
+                                                    "none"
+                                            }}
+                                        />
+                                    </a>
+                                    <UserProfile />
+                                    <WalletIcon
+                                        creditBalance={walletBalance}
+                                        tokenLimit={tokenLimit}
+                                        onClick={() => {
+                                            const profileIcon =
+                                                document.querySelector(
+                                                    ".framer-media-shortcut.profile-icon"
+                                                ) as HTMLElement | null
+                                            profileIcon?.click()
+                                        }}
+                                    />
+                                </div>
+                            </div>
+                            <div
+                                ref={containerRef}
+                                style={{
+                                    display: "flex",
+                                    width: "100%",
+                                    // 👇 REVERTED TO CALC (Safer for Framer) 👇
+                                    height: "calc(100dvh - 50px)", // Use 'dvh' for better iPad support
+                                    marginTop: "50px", // Push it down below the banner
+
+                                    // 👇 THE SCROLL LOCK 👇
+                                    overflow: "hidden",
+                                }}
+                            >
+                                <div
+                                    ref={leftPanelRef}
+                                    className="panel-section"
+                                    style={{
+                                        width: `${leftWidth}%`,
+                                        minWidth: "0%",
+                                        maxWidth: "100%",
+                                        minHeight: "400px",
+                                        display: "flex",
+                                        flexDirection: "column",
+                                        background:
+                                            "linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), url('https://pub-bc72743f8cde45919b8affea99808ed9.r2.dev/gray-empty-blur-template-circle.jpeg') no-repeat center center, #1c1c1c",
+                                        backgroundSize: "cover",
+                                        overflow: "hidden",
+                                        borderLeft: "1px solid #333",
+                                        borderRight: "1px solid #333",
+                                        boxShadow:
+                                            "inset 0 0 2px rgba(255, 255, 255, 0.03), 0 0 6px rgba(0, 0, 0, 0.5)",
+                                        zIndex:
+                                            activePanelZ === "left" ? 10 : 1,
+                                        position: "relative",
+                                        marginTop: "0px",
+                                    }}
+                                >
+                                    <div
+                                        className="ticker-container"
+                                        style={{
+                                            width: "100%",
+                                            height: 40,
+                                            maxHeight: 40,
+                                            overflow: "hidden",
+                                            display: "flex",
+                                            alignItems: "center",
+                                            justifyContent: "flex-start",
+                                            background: "transparent",
+                                            borderBottom: "none",
+                                            boxSizing: "border-box",
+                                        }}
+                                    >
+                                        <div
+                                            ref={leftTickerRef}
+                                            className="ticker-content"
+                                            style={{
+                                                display: "inline-flex",
+                                                whiteSpace: "nowrap",
+                                                WebkitAnimation: `ticker ${animationDuration}s linear infinite`,
+                                                animation: `ticker ${animationDuration}s linear infinite`,
+                                            }}
+                                        >
+                                            {isTickerDataReady ? (
+                                                <ScoreTicker2
+                                                    tuning={
+                                                        filteredTickerData.filteredTuning ||
+                                                        {}
+                                                    }
+                                                    descriptions={
+                                                        filteredTickerData.filteredDescriptions ||
+                                                        {}
+                                                    }
+                                                    className="score-ticker2"
+                                                />
+                                            ) : (
+                                                <span style={{ color: "red" }}>
+                                                    {" "}
+                                                    Error: Ticker data not
+                                                    ready{" "}
+                                                </span>
+                                            )}
+                                        </div>
+                                    </div>
+                                    <div
+                                        className="top-collapsible-bar"
+                                        onClick={() =>
+                                            setShowLeftPanel((prev) => !prev)
+                                        }
+                                        onMouseEnter={() =>
+                                            setHoverLeftLabel(true)
+                                        }
+                                        onMouseLeave={() =>
+                                            setHoverLeftLabel(false)
+                                        }
+                                        style={{
+                                            width: "100%",
+                                            height: 28,
+                                            background:
+                                                "linear-gradient(rgba(28, 28, 28, 0.01), rgba(28, 28, 28, 0.01)), url('https://pub-bc72743f8cde45919b8affea99808ed9.r2.dev/gray-empty-blur-template-circle.jpeg') no-repeat center center",
+                                            backgroundSize: "cover",
+                                            display: "flex",
+                                            justifyContent: "space-between",
+                                            alignItems: "center",
+                                            padding: "0 10px",
+                                            borderBottom: "1px solid #2a2a2a",
+                                            cursor: "pointer",
+                                            zIndex: 10,
+                                            boxShadow:
+                                                "inset 0 0 2px rgba(255, 255, 255, 0.03), 0 0 6px rgba(0, 0, 0, 0.5)",
+                                            boxSizing: "border-box",
+                                        }}
+                                    >
+                                        <div
+                                            className="moät-dj-logo"
+                                            style={{
+                                                color: "#FFFFFF",
+                                                WebkitAnimation: hoverLeftLabel
+                                                    ? "blink 2s ease-in-out infinite"
+                                                    : "none",
+                                                animation: hoverLeftLabel
+                                                    ? "blink 2s ease-in-out infinite"
+                                                    : "none",
+                                            }}
+                                        >
+                                            {" "}
+                                            Cognitive Signature Mixer{" "}
+                                        </div>
+                                        <div
+                                            className="panel-dot-container"
+                                            style={{
+                                                display: "flex",
+                                                gap: "10px",
+                                                alignItems: "center",
+                                            }}
+                                        >
+                                            <div
+                                                className={`vira-deck-1-button-base vira-deck-1-button-green ${activePanel === "archetype" ? "active" : ""}`}
+                                                onClick={(e) => {
+                                                    e.stopPropagation()
+                                                    setActivePanel("archetype")
+                                                }}
+                                            >
+                                                <div
+                                                    className="vira-deck-1-button-text"
+                                                    style={{ color: "#00FFC2" }}
+                                                    onMouseEnter={(e) =>
+                                                        (e.currentTarget.style.animation =
+                                                            "glowGreen 1.5s infinite")
+                                                    }
+                                                    onMouseLeave={(e) =>
+                                                        (e.currentTarget.style.animation =
+                                                            "none")
+                                                    }
+                                                >
+                                                    {" "}
+                                                    ARCH{" "}
+                                                </div>
+                                            </div>
+                                            <div
+                                                className={`vira-deck-1-button-base vira-deck-1-button-pink ${activePanel === "dj" ? "active" : ""}`}
+                                                onClick={(e) => {
+                                                    e.stopPropagation()
+                                                    setActivePanel("dj")
+                                                }}
+                                            >
+                                                <div
+                                                    className="vira-deck-1-button-text"
+                                                    style={{ color: "#F511BC" }}
+                                                    onMouseEnter={(e) =>
+                                                        (e.currentTarget.style.animation =
+                                                            "glowPink 1.5s infinite")
+                                                    }
+                                                    onMouseLeave={(e) =>
+                                                        (e.currentTarget.style.animation =
+                                                            "none")
+                                                    }
+                                                >
+                                                    {" "}
+                                                    CARC{" "}
+                                                </div>
+                                            </div>
+                                            <div
+                                                className={`vira-deck-1-button-base vira-deck-1-button-white ${activePanel === "behavioral" ? "active" : ""}`}
+                                                onClick={(e) => {
+                                                    e.stopPropagation()
+                                                    setActivePanel("behavioral")
+                                                }}
+                                            >
+                                                <div
+                                                    className="vira-deck-1-button-text"
+                                                    style={{ color: "#FFFFFF" }}
+                                                    onMouseEnter={(e) =>
+                                                        (e.currentTarget.style.animation =
+                                                            "glowWhite 1.5s infinite")
+                                                    }
+                                                    onMouseLeave={(e) =>
+                                                        (e.currentTarget.style.animation =
+                                                            "none")
+                                                    }
+                                                >
+                                                    {" "}
+                                                    BEHR{" "}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div
+                                        style={{
+                                            width: "100%",
+                                            overflow: "hidden",
+                                            flex: 1,
+                                            minHeight: 0,
+                                            display: "flex",
+                                            flexDirection: "column",
+                                            boxSizing: "border-box",
+                                        }}
+                                    >
+                                        <div
+                                            style={{
+                                                display: showLeftPanel
+                                                    ? "block"
+                                                    : "none",
+                                            }}
+                                        >
+                                            <>
+                                                <div
+                                                    style={{
+                                                        display:
+                                                            activePanel ===
+                                                            "archetype"
+                                                                ? "block"
+                                                                : "none",
+                                                    }}
+                                                >
+                                                    <ArchetypePanel
+                                                        userId={userId}
+                                                        tuning={archetypeTuning}
+                                                        setTuning={
+                                                            setArchetypeTuning
+                                                        }
+                                                        industryScore={
+                                                            scores.industryScore
+                                                                ?.post ?? 0
+                                                        }
+                                                        executiveScore={
+                                                            scores
+                                                                .executiveScore
+                                                                ?.post ?? 0
+                                                        }
+                                                        totalScore={
+                                                            activeRightPanel ===
+                                                            "industry"
+                                                                ? (scores
+                                                                      .industryScore
+                                                                      ?.post ??
+                                                                  0)
+                                                                : isMoatPlusTier
+                                                                  ? Math.round(
+                                                                        ((scores
+                                                                            .industryScore
+                                                                            ?.post ??
+                                                                            0) +
+                                                                            (scores
+                                                                                .executiveScore
+                                                                                ?.post ??
+                                                                                0)) /
+                                                                            2
+                                                                    )
+                                                                  : (scores
+                                                                        .industryScore
+                                                                        ?.post ??
+                                                                    0)
+                                                        }
+                                                        isMoatPlusTier={
+                                                            isMoatPlusTier
+                                                        }
+                                                        hoveredTicker={
+                                                            hoveredTicker
+                                                        }
+                                                        setHoveredTicker={
+                                                            setHoveredTicker
+                                                        }
+                                                        updateApexScoreboard={(
+                                                            score
+                                                        ) =>
+                                                            updateApexScoreboard(
+                                                                score,
+                                                                "archetypeScore"
+                                                            )
+                                                        }
+                                                    />
+                                                </div>
+                                                <div
+                                                    style={{
+                                                        display:
+                                                            activePanel === "dj"
+                                                                ? "block"
+                                                                : "none",
+                                                    }}
+                                                >
+                                                    <CareerArcPanel
+                                                        tuning={careerArcTuning}
+                                                        setTuning={
+                                                            setCareerArcTuning
+                                                        }
+                                                        industryScore={
+                                                            scores.industryScore
+                                                                ?.post ?? 0
+                                                        }
+                                                        executiveScore={
+                                                            scores
+                                                                .executiveScore
+                                                                ?.post ?? 0
+                                                        }
+                                                        archetypeScore={
+                                                            scores
+                                                                .archetypeScore
+                                                                ?.post ?? 0
+                                                        }
+                                                        behavioralScore={
+                                                            scores
+                                                                .behavioralScore
+                                                                ?.post ?? 0
+                                                        }
+                                                        totalScore={
+                                                            activeRightPanel ===
+                                                            "industry"
+                                                                ? (scores
+                                                                      .industryScore
+                                                                      ?.post ??
+                                                                  0)
+                                                                : isMoatPlusTier
+                                                                  ? Math.round(
+                                                                        ((scores
+                                                                            .industryScore
+                                                                            ?.post ??
+                                                                            0) +
+                                                                            (scores
+                                                                                .executiveScore
+                                                                                ?.post ??
+                                                                                0)) /
+                                                                            2
+                                                                    )
+                                                                  : (scores
+                                                                        .industryScore
+                                                                        ?.post ??
+                                                                    0)
+                                                        }
+                                                        isMoatPlusTier={
+                                                            isMoatPlusTier
+                                                        }
+                                                        hoveredTicker={
+                                                            hoveredTicker
+                                                        }
+                                                        setHoveredTicker={
+                                                            setHoveredTicker
+                                                        }
+                                                        effectTrigger={
+                                                            effectTrigger
+                                                        }
+                                                        updateApexScoreboard={(
+                                                            score
+                                                        ) =>
+                                                            updateApexScoreboard(
+                                                                score,
+                                                                "careerArcScore"
+                                                            )
+                                                        }
+                                                    />
+                                                </div>
+
+                                                <div
+                                                    style={{
+                                                        display:
+                                                            activePanel ===
+                                                            "behavioral"
+                                                                ? "block"
+                                                                : "none",
+                                                    }}
+                                                >
+                                                    <BehavioralResonancePanel
+                                                        tuning={
+                                                            behavioralTuning
+                                                        }
+                                                        setTuning={
+                                                            setBehavioralTuning
+                                                        }
+                                                        industryScore={
+                                                            scores.industryScore
+                                                                ?.post ?? 0
+                                                        }
+                                                        executiveScore={
+                                                            scores
+                                                                .executiveScore
+                                                                ?.post ?? 0
+                                                        }
+                                                        totalScore={
+                                                            activeRightPanel ===
+                                                            "industry"
+                                                                ? (scores
+                                                                      .industryScore
+                                                                      ?.post ??
+                                                                  0)
+                                                                : isMoatPlusTier
+                                                                  ? Math.round(
+                                                                        ((scores
+                                                                            .industryScore
+                                                                            ?.post ??
+                                                                            0) +
+                                                                            (scores
+                                                                                .executiveScore
+                                                                                ?.post ??
+                                                                                0)) /
+                                                                            2
+                                                                    )
+                                                                  : (scores
+                                                                        .industryScore
+                                                                        ?.post ??
+                                                                    0)
+                                                        }
+                                                        isMoatPlusTier={
+                                                            isMoatPlusTier
+                                                        }
+                                                        hoveredTicker={
+                                                            hoveredTicker
+                                                        }
+                                                        setHoveredTicker={
+                                                            setHoveredTicker
+                                                        }
+                                                        updateApexScoreboard={(
+                                                            score
+                                                        ) =>
+                                                            updateApexScoreboard(
+                                                                score,
+                                                                "behavioralScore"
+                                                            )
+                                                        }
+                                                    />
+                                                </div>
+                                            </>
+                                        </div>
+                                        <Deck1 moatChatRef={moatChatRef} />
+                                    </div>
+                                </div>
+                                <PanelDivider
+                                    side="left"
+                                    showPanel={showLeftPanel}
+                                    width={leftWidth}
+                                    setShowPanel={setShowLeftPanel}
+                                    setWidths={(left, center, right) => {
+                                        setLeftWidth(left)
+                                        setCenterWidth(center)
+                                        setRightWidth(right)
+                                    }}
+                                />
+                                <div
+                                    ref={centerPanelRef}
+                                    className="panel-section"
+                                    style={{
+                                        width: `${centerWidth}%`,
+                                        minWidth: "0%",
+                                        maxWidth: "100%",
+                                        minHeight: "410px",
+                                        backgroundImage:
+                                            "url('https://pub-bc72743f8cde45919b8affea99808ed9.r2.dev/gray-empty-blur-template-circle.jpeg')",
+                                        display: isPanelExtended
+                                            ? "none"
+                                            : "flex",
+                                        flexDirection: "column",
+                                        position: "relative",
+                                        zIndex: 15,
+                                    }}
+                                >
+                                    <div
+                                        className="center-content-wrapper"
+                                        style={{
+                                            width: isPanelExtended
+                                                ? "0"
+                                                : "100%",
+                                            flex: 1,
+                                            display: isPanelExtended
+                                                ? "none"
+                                                : "flex",
+                                            flexDirection: "column",
+                                            overflow: "hidden",
+                                        }}
+                                    >
+                                        <div
+                                            className="moat-dj-panel"
+                                            style={{
+                                                boxSizing: "border-box",
+                                                flexShrink: 0,
+                                                display:
+                                                    leftWidth === 0 &&
+                                                    rightWidth === 0
+                                                        ? "none"
+                                                        : "block",
+                                            }}
+                                        >
+                                            <MoatDJPanel
+                                                activeAgent={activeAgent}
+                                                onAgentsPanelToggle={
+                                                    setAgentsPanelOpen
+                                                }
+                                                updateApexScoreboard={
+                                                    updateApexScoreboard
+                                                }
+                                                scores={scores}
+                                                activeModel={activeModel}
+                                                userId={userId}
+                                            />
+                                        </div>
+                                        <div
+                                            style={{
+                                                flex: 1,
+                                                display: "flex",
+                                                flexDirection: "column",
+                                                boxSizing: "border-box",
+                                            }}
+                                        >
+                                            <div
+                                                className="chatbox-container"
+                                                style={{
+                                                    flex: 1,
+                                                    display: "flex",
+                                                    flexDirection: "column",
+                                                    margin: "12.5px 10px 12.5px",
+                                                }}
+                                            >
+                                                <div
+                                                    className="chatbox-container-inner"
+                                                    style={{ flex: 1 }}
+                                                >
+                                                    {chatVisible &&
+                                                        !isChatPopupOpen && (
+                                                            <>
+                                                                {!isChatLoaded && (
+                                                                    <div
+                                                                        style={{
+                                                                            width: "calc(100% - 20px)",
+                                                                            height: "100%",
+                                                                            display:
+                                                                                "flex",
+                                                                            justifyContent:
+                                                                                "center",
+                                                                            alignItems:
+                                                                                "center",
+                                                                            background:
+                                                                                "https://pub-bc72743f8cde45919b8affea99808ed9.r2.dev/gray-empty-blur-template-circle.jpeg",
+                                                                            borderRadius:
+                                                                                "10px",
+                                                                            color: "#00FFC2",
+                                                                            fontSize:
+                                                                                "14px",
+                                                                        }}
+                                                                    >
+                                                                        {" "}
+                                                                        Loading
+                                                                        Chat...{" "}
+                                                                    </div>
+                                                                )}
+                                                                <MoatChatGPT
+                                                                    activeAgent={
+                                                                        activeAgent
+                                                                    }
+                                                                    setActiveAgent={
+                                                                        setActiveAgent
+                                                                    }
+                                                                    ref={
+                                                                        moatChatRef
+                                                                    }
+                                                                    tuning={
+                                                                        combinedTuning
+                                                                    }
+                                                                    scores={
+                                                                        scores
+                                                                    }
+                                                                    apexIndex={calculateApexIndex(
+                                                                        scores
+                                                                    )}
+                                                                    fileContents={
+                                                                        fileContents
+                                                                    }
+                                                                    setFileContents={
+                                                                        setFileContents
+                                                                    }
+                                                                    setIsPanelExtended={
+                                                                        setIsPanelExtended
+                                                                    }
+                                                                    setIsChatPopupOpen={
+                                                                        setIsChatPopupOpen
+                                                                    }
+                                                                    onSliderChange={
+                                                                        handleSliderChangeFromChat
+                                                                    }
+                                                                    activeModel={
+                                                                        activeModel
+                                                                    } // ✅ ADD
+                                                                    onModelChange={
+                                                                        setActiveModel
+                                                                    } // ✅ ADD
+                                                                    userId={
+                                                                        userId
+                                                                    }
+                                                                    style={{
+                                                                        borderRadius:
+                                                                            "10px",
+                                                                        transition:
+                                                                            "box-shadow 0.3s ease, transform 0.2s ease",
+                                                                        background:
+                                                                            "#000000",
+                                                                        width: "calc(100% - 20px)",
+                                                                        height: "100%",
+                                                                        display:
+                                                                            isChatLoaded
+                                                                                ? "block"
+                                                                                : "none",
+                                                                    }}
+                                                                    onLoad={() =>
+                                                                        setIsChatLoaded(
+                                                                            true
+                                                                        )
+                                                                    }
+                                                                    messages={
+                                                                        chatMessages
+                                                                    }
+                                                                    setMessages={
+                                                                        setChatMessages
+                                                                    }
+                                                                    isExpanded={
+                                                                        leftWidth ===
+                                                                            0 &&
+                                                                        rightWidth ===
+                                                                            0
+                                                                    }
+                                                                    onToggleExpand={
+                                                                        toggleChatExpand
+                                                                    }
+                                                                />
+                                                            </>
+                                                        )}
+                                                </div>
+                                            </div>
+                                            <MoatSoundPanel
+                                                isButtonClicked={
+                                                    isButtonClicked
+                                                }
+                                                setIsButtonClicked={
+                                                    setIsButtonClicked
+                                                }
+                                                onEffectTrigger={
+                                                    handleEffectTrigger
+                                                }
+                                                onTextTrigger={
+                                                    handleSoundTextTrigger
+                                                }
+                                                currentTier={currentTier}
+                                                userId={userId}
+                                            />
+                                        </div>
+                                    </div>
+                                </div>
+                                <PanelDivider
+                                    side="right"
+                                    showPanel={showRightPanel}
+                                    width={rightWidth}
+                                    setShowPanel={setShowRightPanel}
+                                    setWidths={(left, center, right) => {
+                                        setLeftWidth(left)
+                                        setCenterWidth(center)
+                                        setRightWidth(right)
+                                    }}
+                                    setIsChatPopupOpen={setIsChatPopupOpen}
+                                    setActivePanelZ={setActivePanelZ}
+                                    setIsPanelExtended={setIsPanelExtended}
+                                />
+                                <div
+                                    ref={rightPanelRef}
+                                    className="panel-section"
+                                    style={{
+                                        width: `${rightWidth}%`,
+                                        minWidth: "0%",
+                                        maxWidth: "100%",
+                                        minHeight: "400px",
+                                        display: "flex",
+                                        flexDirection: "column",
+                                        background:
+                                            "linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), url('https://pub-bc72743f8cde45919b8affea99808ed9.r2.dev/gray-empty-blur-template-circle.jpeg') no-repeat center center, #1c1c1c",
+                                        backgroundSize: "cover",
+                                        overflow: "hidden",
+                                        borderLeft: "1px solid #333",
+                                        borderRight: "1px solid #333",
+                                        boxShadow:
+                                            "inset 0 0 2px rgba(255, 255, 255, 0.03), 0 0 6px rgba(0, 0, 0, 0.5)",
+                                        zIndex:
+                                            activePanelZ === "right" ? 10 : 1,
+                                        position: "relative",
+                                        marginTop: "0px",
+                                    }}
+                                >
+                                    <div
+                                        className="ticker-container"
+                                        style={{
+                                            width: "100%",
+                                            height: 40,
+                                            maxHeight: 40,
+                                            overflow: "hidden",
+                                            display: "flex",
+                                            alignItems: "center",
+                                            justifyContent: "flex-start",
+                                            background: "transparent",
+                                            borderBottom: "none",
+                                            boxSizing: "border-box",
+                                        }}
+                                    >
+                                        <div
+                                            ref={tickerRef}
+                                            className="ticker-content"
+                                            style={{
+                                                display: "inline-flex",
+                                                whiteSpace: "nowrap",
+                                                WebkitAnimation: `ticker ${animationDuration}s linear infinite`,
+                                                animation: `ticker ${animationDuration}s linear infinite`,
+                                            }}
+                                        >
+                                            {isTickerDataReady ? (
+                                                <ScoreTicker
+                                                    tuning={
+                                                        filteredTickerData.filteredTuning ||
+                                                        {}
+                                                    }
+                                                    descriptions={
+                                                        filteredTickerData.filteredDescriptions ||
+                                                        {}
+                                                    }
+                                                    side="right"
+                                                    className="score-ticker"
+                                                />
+                                            ) : (
+                                                <span style={{ color: "red" }}>
+                                                    {" "}
+                                                    Error: Ticker data not
+                                                    ready{" "}
+                                                </span>
+                                            )}
+                                        </div>
+                                    </div>
+                                    <div
+                                        className="top-collapsible-bar"
+                                        onClick={() =>
+                                            setShowRightPanel((prev) => !prev)
+                                        }
+                                        onMouseEnter={() =>
+                                            setHoverRightLabel(true)
+                                        }
+                                        onMouseLeave={() =>
+                                            setHoverRightLabel(false)
+                                        }
+                                        style={{
+                                            width: "100%",
+                                            height: 28,
+                                            background:
+                                                "linear-gradient(rgba(28, 28, 28, 0.01), rgba(28, 28, 28, 0.01)), url('https://pub-bc72743f8cde45919b8affea99808ed9.r2.dev/gray-empty-blur-template-circle.jpeg') no-repeat center center",
+                                            backgroundSize: "cover",
+                                            display: "flex",
+                                            justifyContent: "space-between",
+                                            alignItems: "center",
+                                            padding: "0 10px",
+                                            borderBottom: "1px solid #2a2a2a",
+                                            cursor: "pointer",
+                                            zIndex: 10,
+                                            boxShadow:
+                                                "inset 0 0 2px rgba(255, 255, 255, 0.05), 0 0 6px rgba(0, 0, 0, 0.5)",
+                                            boxSizing: "border-box",
+                                        }}
+                                    >
+                                        <div
+                                            className="moät-scores-logo"
+                                            style={{
+                                                color: "#FFFFFF",
+                                                WebkitAnimation: hoverLeftLabel
+                                                    ? "blink 2s ease-in-out infinite"
+                                                    : "none",
+                                                animation: hoverLeftLabel
+                                                    ? "blink 2s ease-in-out infinite"
+                                                    : "none",
+                                            }}
+                                        >
+                                            {" "}
+                                            Strategic Positioning Mixer{" "}
+                                        </div>
+                                        <div
+                                            className="panel-dot-container"
+                                            style={{
+                                                display: "flex",
+                                                gap: "4px",
+                                                alignItems: "center",
+                                            }}
+                                        >
+                                            <div
+                                                className={`vira-deck-1-button-base vira-deck-1-button-green ${activeRightPanel === "industry" ? "active" : ""}`}
+                                                onClick={(e) => {
+                                                    e.stopPropagation()
+                                                    setActiveRightPanel(
+                                                        "industry"
+                                                    )
+                                                }}
+                                            >
+                                                <div
+                                                    className="vira-deck-1-button-text"
+                                                    style={{ color: "#00FFC2" }}
+                                                    onMouseEnter={(e) =>
+                                                        (e.currentTarget.style.animation =
+                                                            "glowGreen 1.5s infinite")
+                                                    }
+                                                    onMouseLeave={(e) =>
+                                                        (e.currentTarget.style.animation =
+                                                            "none")
+                                                    }
+                                                >
+                                                    {" "}
+                                                    INDU{" "}
+                                                </div>
+                                            </div>
+                                            <div
+                                                className={`vira-deck-1-button-base vira-deck-1-button-pink ${activeRightPanel === "executive" ? "active" : ""}`}
+                                                onClick={(e) => {
+                                                    e.stopPropagation()
+                                                    setActiveRightPanel(
+                                                        "executive"
+                                                    )
+                                                }}
+                                            >
+                                                <div
+                                                    className="vira-deck-1-button-text"
+                                                    style={{ color: "#F511BC" }}
+                                                    onMouseEnter={(e) =>
+                                                        (e.currentTarget.style.animation =
+                                                            "glowPink 1.5s infinite")
+                                                    }
+                                                    onMouseLeave={(e) =>
+                                                        (e.currentTarget.style.animation =
+                                                            "none")
+                                                    }
+                                                >
+                                                    {" "}
+                                                    EXEC{" "}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div
+                                        style={{
+                                            width: "100%",
+                                            overflow: "hidden",
+                                            flex: 1,
+                                            display: "flex",
+                                            flexDirection: "column",
+                                            boxSizing: "border-box",
+                                        }}
+                                    >
+                                        <div
+                                            style={{
+                                                display: showRightPanel
+                                                    ? "block"
+                                                    : "none",
+                                            }}
+                                        >
+                                            <div
+                                                className="right-panel-container"
+                                                style={{
+                                                    display: "flex",
+                                                    justifyContent:
+                                                        "space-between",
+                                                    padding: 12,
+                                                    gap: 16,
+                                                    borderBottom:
+                                                        "1px solid #2a2a2a",
+                                                    flexWrap: "nowrap",
+                                                    width: "100%",
+                                                    overflow: "hidden",
+                                                    boxSizing: "border-box",
+                                                }}
+                                            >
+                                                <IndustryPanel
+                                                    tuning={industryTuning}
+                                                    setTuning={
+                                                        setIndustryTuning
+                                                    }
+                                                    isDropTier={
+                                                        currentTier === "DROP"
+                                                    }
+                                                    isMoatPlusTier={
+                                                        isMoatPlusTier
+                                                    }
+                                                    hoveredTicker={
+                                                        hoveredTicker
+                                                    }
+                                                    setHoveredTicker={
+                                                        setHoveredTicker
+                                                    }
+                                                    activeRightPanel={
+                                                        activeRightPanel
+                                                    }
+                                                    updateApexScoreboard={(
+                                                        score
+                                                    ) =>
+                                                        updateApexScoreboard(
+                                                            score,
+                                                            "industryScore"
+                                                        )
+                                                    }
+                                                    style={{
+                                                        display:
+                                                            activeRightPanel ===
+                                                            "industry"
+                                                                ? "flex"
+                                                                : "none",
+                                                    }}
+                                                />
+                                                <ExecutivePanel
+                                                    tuning={executiveTuning}
+                                                    setTuning={
+                                                        setExecutiveTuning
+                                                    }
+                                                    isDropTier={
+                                                        currentTier === "DROP"
+                                                    }
+                                                    isMoatPlusTier={
+                                                        isMoatPlusTier
+                                                    }
+                                                    hoveredTicker={
+                                                        hoveredTicker
+                                                    }
+                                                    setHoveredTicker={
+                                                        setHoveredTicker
+                                                    }
+                                                    activeRightPanel={
+                                                        activeRightPanel
+                                                    }
+                                                    updateApexScoreboard={(
+                                                        score
+                                                    ) =>
+                                                        updateApexScoreboard(
+                                                            score,
+                                                            "executiveScore"
+                                                        )
+                                                    }
+                                                    setIsMoatPlusTier={
+                                                        setIsMoatPlusTier
+                                                    }
+                                                    style={{
+                                                        display:
+                                                            activeRightPanel ===
+                                                            "executive"
+                                                                ? "flex"
+                                                                : "none",
+                                                    }}
+                                                />
+                                            </div>
+                                        </div>
+                                        <Deck2 />
+                                    </div>
+                                </div>
+                            </div>
+                            {isChatPopupOpen && chatVisible && (
+                                <div
+                                    className="chatbox-popup"
+                                    style={{
+                                        left: `${dragPosition.x}px`,
+                                        top: `${dragPosition.y}px`,
+                                        width: `${popupSize.width}px`,
+                                        height: `${popupSize.height}px`,
+                                        resize: "none",
+                                    }}
+                                >
+                                    <div
+                                        className="chatbox-popup-header"
+                                        onMouseDown={handleMouseDown}
+                                        onTouchStart={(e) =>
+                                            handleMouseDown(e as any)
+                                        }
+                                    >
+                                        <div className="chatbox-popup-title">
+                                            {" "}
+                                            Keep Chatting{" "}
+                                        </div>
+                                        <div
+                                            className="chatbox-popup-close"
+                                            onClick={() =>
+                                                setIsChatPopupOpen(false)
+                                            }
+                                        >
+                                            {" "}
+                                            ✕{" "}
+                                        </div>
+                                    </div>
+                                    <div
+                                        className="chatbox-popup-content"
+                                        style={{
+                                            display: "flex",
+                                            flexDirection: "column",
+                                            gap: "10px",
+                                            position: "relative",
+                                            flex: 1,
+                                            height: "100%",
+                                        }}
+                                    >
+                                        <MoatChatGPT
+                                            tuning={combinedTuning}
+                                            scores={scores}
+                                            activeModel={activeModel} // ✅ controlled from above
+                                            onModelChange={setActiveModel} // ✅ bubble up selection
+                                            userId={userId}
+                                            apexIndex={calculateApexIndex(
+                                                scores
+                                            )}
+                                            fileContents={fileContents}
+                                            setFileContents={setFileContents}
+                                            setIsPanelExtended={
+                                                setIsPanelExtended
+                                            }
+                                            setIsChatPopupOpen={
+                                                setIsChatPopupOpen
+                                            }
+                                            onSliderChange={
+                                                handleSliderChangeFromChat
+                                            }
+                                            style={{
+                                                borderRadius: "8px",
+                                                transition:
+                                                    "box-shadow 0.3s ease, transform 0.2s ease",
+                                                background: "#000000",
+                                                flex: "1 1 auto",
+                                                width: "100%",
+                                                height: "100%",
+                                            }}
+                                            onMouseEnter={(e) => {
+                                                // Changed from rgba(0, 255, 194, 0.6) to rgba(255, 255, 255, 0.6)
+                                                e.currentTarget.style.boxShadow =
+                                                    "0 0 14px rgba(255, 255, 255, 0.6)"
+                                                e.currentTarget.style.transform =
+                                                    "scale(1.01)"
+                                            }}
+                                            onMouseLeave={(e) => {
+                                                e.currentTarget.style.boxShadow =
+                                                    "none"
+                                                e.currentTarget.style.transform =
+                                                    "scale(1)"
+                                            }}
+                                            messages={chatMessages}
+                                            setMessages={setChatMessages}
+                                        />
+                                        <div
+                                            onMouseDown={startResize}
+                                            onTouchStart={startResize}
+                                            style={{
+                                                position: "absolute",
+                                                bottom: 0,
+                                                right: 0,
+                                                width: "15px", // Bigger touch target
+                                                height: "15px",
+                                                cursor: "nwse-resize",
+                                                zIndex: 2000,
+                                                background:
+                                                    "linear-gradient(135deg, transparent 50%, #FFFFFF 50%)",
+                                                opacity: 0.8,
+                                                borderBottomRightRadius: "10px",
+                                                touchAction: "none",
+                                            }}
+                                        />
+                                        <div
+                                            style={{
+                                                color: "#aaa",
+                                                fontSize: "12px",
+                                                textAlign: "center",
+                                            }}
+                                        >
+                                            {" "}
+                                            No audio file uploaded.{" "}
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    </ATSProvider>
+                </DocumentBridgeProvider>
+            </ResumeDataProvider>
+        </ErrorBoundaryComponent>
+    )
+}
